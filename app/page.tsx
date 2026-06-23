@@ -89,7 +89,15 @@ function editablesToBundles(tracks: EditableTrack[]): CanonicalBundle[] {
   })
 }
 
-const EXAMPLES: Record<InputFormat, string> = {
+function blankTrack(): EditableTrack {
+  return {
+    workId: crypto.randomUUID(), title: '', iswc: '', isrc: '', artistName: '', duration: '',
+    writers: [{ id: crypto.randomUUID(), name: '', ipi: '', role: 'C', prShare: '', pro: '' }],
+    publishers: [],
+  }
+}
+
+const EXAMPLES: Record<Exclude<InputFormat, 'manual'>, string> = {
   cip60: JSON.stringify({
     '721': {
       '<policy_id>': {
@@ -210,6 +218,11 @@ export default function Home() {
   const removeWriter = (i: number) => setTrack({ writers: ct.writers.filter((_, j) => j !== i) })
   const addPublisher = () => setTrack({ publishers: [...ct.publishers, { id: crypto.randomUUID(), name: '', ipi: '', share: '', pro: '' }] })
   const removePublisher = (i: number) => setTrack({ publishers: ct.publishers.filter((_, j) => j !== i) })
+  const addTrack = () => { setTracks(p => [...p, blankTrack()]); setSelectedTrack(tracks.length) }
+  const removeTrack = (i: number) => {
+    setTracks(p => p.filter((_, j) => j !== i))
+    setSelectedTrack(prev => Math.min(prev, tracks.length - 2))
+  }
 
   return (
     <div className="h-screen flex flex-col font-sans">
@@ -227,7 +240,9 @@ export default function Home() {
           <div className="p-4 border-b border-zinc-100">
             <div className="flex items-center justify-between mb-2">
               <SecHead>Input</SecHead>
-              <button onClick={() => setRawInput(EXAMPLES[inputFormat])} className="text-xs text-blue-500 hover:text-blue-700">Load example</button>
+              {inputFormat !== 'manual' && (
+                <button onClick={() => setRawInput(EXAMPLES[inputFormat as Exclude<InputFormat, 'manual'>])} className="text-xs text-blue-500 hover:text-blue-700">Load example</button>
+              )}
             </div>
             <div className="flex gap-0 border-b border-zinc-100 mb-3 text-amber-100">
               {(['cip60', 'cwr', 'ddex'] as InputFormat[]).map(f => (
@@ -235,15 +250,30 @@ export default function Home() {
                   {f.toUpperCase()}
                 </Tab>
               ))}
+              <Tab active={inputFormat === 'manual'} onClick={() => {
+                setInputFormat('manual'); setRawInput(''); setParseError(null); setParseWarnings([])
+                setTracks(prev => prev.length > 0 ? prev : [blankTrack()]); setSelectedTrack(0)
+              }}>
+                Manual
+              </Tab>
             </div>
-            <textarea value={rawInput} onChange={e => setRawInput(e.target.value)}
-              placeholder={inputFormat === 'cip60' ? '{ "721": { ... } }' : inputFormat === 'cwr' ? 'HDR...\nNWR...' : '<MusicalWorkNotificationMessage>'}
-              className="w-full h-48 font-mono text-xs p-3 border border-zinc-200 rounded resize-none outline-none focus:ring-2 focus:ring-blue-300 text-blue-600" spellCheck={false} />
-            {parseError && <p className="mt-2 text-xs text-red-600 font-mono bg-red-50 border border-red-200 rounded p-2">{parseError}</p>}
-            <button onClick={handleParse} disabled={!rawInput.trim() || isParsing}
-              className="mt-3 w-full py-2 bg-zinc-900 text-white text-sm font-semibold rounded hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-              {isParsing ? 'Parsing…' : 'Parse →'}
-            </button>
+            {inputFormat !== 'manual' ? (
+              <>
+                <textarea value={rawInput} onChange={e => setRawInput(e.target.value)}
+                  placeholder={inputFormat === 'cip60' ? '{ "721": { ... } }' : inputFormat === 'cwr' ? 'HDR...\nNWR...' : '<MusicalWorkNotificationMessage>'}
+                  className="w-full h-48 font-mono text-xs p-3 border border-zinc-200 rounded resize-none outline-none focus:ring-2 focus:ring-blue-300 text-blue-600" spellCheck={false} />
+                {parseError && <p className="mt-2 text-xs text-red-600 font-mono bg-red-50 border border-red-200 rounded p-2">{parseError}</p>}
+                <button onClick={handleParse} disabled={!rawInput.trim() || isParsing}
+                  className="mt-3 w-full py-2 bg-zinc-900 text-white text-sm font-semibold rounded hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                  {isParsing ? 'Parsing…' : 'Parse →'}
+                </button>
+              </>
+            ) : (
+              <div className="flex items-center justify-between py-1">
+                <p className="text-xs text-zinc-400">Enter work details directly — no file needed.</p>
+                <button onClick={addTrack} className="text-xs text-blue-500 hover:text-blue-700 font-medium">+ Add Track</button>
+              </div>
+            )}
           </div>
 
           {tracks.length > 0 && (
@@ -253,13 +283,21 @@ export default function Home() {
                   {parseWarnings.map((w, i) => <p key={i} className="text-xs text-amber-700">&#9888; {w}</p>)}
                 </div>
               )}
-              {tracks.length > 1 && (
+              {(tracks.length > 1 || inputFormat === 'manual') && (
                 <div className="flex flex-wrap gap-1 mb-3">
                   {tracks.map((t, i) => (
-                    <button key={t.workId} onClick={() => setSelectedTrack(i)}
-                      className={`text-xs px-2 py-1 rounded border transition-colors ${selectedTrack === i ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-500 hover:border-zinc-400'}`}>
-                      #{i + 1} {t.title.slice(0, 18) || '(untitled)'}
-                    </button>
+                    <div key={t.workId} className="flex items-center gap-0">
+                      <button onClick={() => setSelectedTrack(i)}
+                        className={`text-xs px-2 py-1 rounded-l border transition-colors ${selectedTrack === i ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-500 hover:border-zinc-400'}`}>
+                        #{i + 1} {t.title.slice(0, 18) || '(untitled)'}
+                      </button>
+                      {inputFormat === 'manual' && tracks.length > 1 && (
+                        <button onClick={() => removeTrack(i)}
+                          className={`text-xs px-1.5 py-1 rounded-r border-y border-r transition-colors ${selectedTrack === i ? 'bg-zinc-700 text-zinc-300 border-zinc-900' : 'border-zinc-200 text-zinc-400 hover:text-red-500 hover:border-zinc-400'}`}>
+                          ✕
+                        </button>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}

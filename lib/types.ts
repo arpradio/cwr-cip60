@@ -73,7 +73,7 @@ export interface CanonicalBundle {
 }
 
 export type Society = 'ASCAP' | 'BMI' | 'SESAC' | 'GMR' | 'SOCAN' | 'PRS' | 'GEMA' | 'SACEM'
-export type InputFormat = 'cip60' | 'cwr' | 'ddex'
+export type InputFormat = 'cip60' | 'cwr' | 'ddex' | 'manual'
 export type OutputFormat = 'cwr' | 'ddex' | 'cip60'
 
 export interface GenerateOptions {
