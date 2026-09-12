@@ -1,4 +1,5 @@
 import type { CanonicalBundle, Party, Work, Recording, WriterContrib, PublisherContrib, WriterRole } from '../types'
+import { hashInput } from '../hash'
 
 // Basic regex-based XML field extraction (no external parser needed)
 function firstTag(xml: string, tag: string): string {
@@ -16,7 +17,7 @@ function allBlocks(xml: string, tag: string): string[] {
 
 const ROLE_MAP: Record<string, WriterRole> = {
   Composer: 'C', Author: 'A', Lyricist: 'A', ComposerLyricist: 'CA',
-  Arranger: 'AR', Translator: 'TR', Adaptor: 'AD', AuthorOfArrangement: 'E', SubAuthor: 'SE',
+  Arranger: 'AR', Translator: 'TR', Adaptor: 'AD', AuthorOfArrangement: 'E', SubAuthor: 'SA',
 }
 
 export function ddexToCanonical(xml: string): { bundles: CanonicalBundle[]; warnings: string[] } {
@@ -27,6 +28,8 @@ export function ddexToCanonical(xml: string): { bundles: CanonicalBundle[]; warn
   if (notifications.length === 0) {
     throw new Error('No MusicalWorkNotification elements found — confirm this is DDEX MWN XML.')
   }
+
+  const sourceHash = hashInput(xml)
 
   const bundles: CanonicalBundle[] = notifications.map(notif => {
     const workBlock = allBlocks(notif, 'MusicalWork')[0] ?? notif
@@ -59,7 +62,7 @@ export function ddexToCanonical(xml: string): { bundles: CanonicalBundle[]; warn
       const partyId = crypto.randomUUID()
       if (roleStr === 'MusicPublisher') {
         parties.push({ id: partyId, name: fullName, type: 'publisher', ipi: ipi || undefined, society_affiliations: [] })
-        publishers.push({ party_id: partyId, role: 'E', pr_share: prShare, mr_share: mrShare || prShare, sr_share: prShare, territory: 'WW' })
+        publishers.push({ party_id: partyId, role: 'E', pr_share: prShare, mr_share: mrShare || prShare, sr_share: prShare })
       } else {
         parties.push({ id: partyId, name: fullName, type: 'writer', ipi: ipi || undefined, isni: isni || undefined, society_affiliations: [] })
         writers.push({ party_id: partyId, role: ROLE_MAP[roleStr] ?? 'C', pr_share: prShare, mr_share: mrShare || prShare, sr_share: prShare })
@@ -71,7 +74,7 @@ export function ddexToCanonical(xml: string): { bundles: CanonicalBundle[]; warn
       id: workId, title, alternate_titles: [], iswc: iswc || undefined,
       proprietary_ids: {}, writers, publishers, agreements: [],
       musical_work_distribution_category: 'POP',
-      created_at: now, updated_at: now, source_hash: '',
+      created_at: now, updated_at: now, source_hash: sourceHash,
     }
 
     if (writers.length === 0) warnings.push(`"${title}": no contributors found.`)

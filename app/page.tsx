@@ -1,7 +1,8 @@
 ﻿'use client'
 
 import { useState, useCallback } from 'react'
-import type { CanonicalBundle, InputFormat, OutputFormat, Society, WriterRole } from '@/lib/types'
+import type { CanonicalBundle, InputFormat, OutputFormat, Society, WriterRole, TerritoryScope } from '@/lib/types'
+import { TERRITORIES } from '@/lib/data/territories'
 
 interface EditableWriter {
   id: string; name: string; ipi: string; role: string; prShare: string; pro: string
@@ -14,12 +15,21 @@ interface EditableTrack {
   artistName: string; duration: string
   writers: EditableWriter[]
   publishers: EditablePublisher[]
+  // Collection territory for this work's SPT/SWT records. `territorySpecified` is false
+  // when the parsed source metadata didn't say — CIP-60 has no territory field at all —
+  // so the UI always prompts to confirm worldwide or pick territories before generating.
+  territoryMode: TerritoryScope['mode']
+  territoryCodes: string[]
+  territorySpecified: boolean
 }
+
+const TERRITORIES_BY_CODE = new Map(TERRITORIES.map(t => [t.code, t]))
+const SORTED_TERRITORIES = [...TERRITORIES].sort((a, b) => a.name.localeCompare(b.name))
 
 const WRITER_ROLES: [WriterRole, string][] = [
   ['C', 'C — Composer'], ['A', 'A — Lyricist/Author'], ['CA', 'CA — Composer & Author'],
   ['AR', 'AR — Arranger'], ['TR', 'TR — Translator'], ['AD', 'AD — Adaptor'],
-  ['E', 'E — Author of Arrangement'], ['SE', 'SE — Sub-author'],
+  ['E', 'E — Author of Arrangement'], ['SA', 'SA — Sub-author'], ['SR', 'SR — Sub-arranger'],
 ]
 const PROS = ['', 'ASCAP', 'BMI', 'SESAC', 'GMR', 'SOCAN', 'PRS', 'GEMA', 'SACEM']
 const SOCIETIES: Society[] = ['ASCAP', 'BMI', 'SESAC', 'GMR', 'SOCAN', 'PRS', 'GEMA', 'SACEM']
@@ -27,10 +37,14 @@ const SOCIETIES: Society[] = ['ASCAP', 'BMI', 'SESAC', 'GMR', 'SOCAN', 'PRS', 'G
 function bundlesToEditable(bundles: CanonicalBundle[]): EditableTrack[] {
   return bundles.map(b => {
     const pm = new Map(b.parties.map(p => [p.id, p]))
+    const scope = b.work.territory_scope
     return {
       workId: b.work.id, title: b.work.title, iswc: b.work.iswc ?? '',
       duration: b.work.duration ?? '', isrc: b.recordings[0]?.isrc ?? '',
       artistName: b.recordings[0]?.artist_name ?? '',
+      territoryMode: scope?.mode ?? 'world',
+      territoryCodes: scope?.territories ?? [],
+      territorySpecified: scope != null,
       writers: b.work.writers.map(w => {
         const p = pm.get(w.party_id)
         return {
@@ -49,9 +63,17 @@ function bundlesToEditable(bundles: CanonicalBundle[]): EditableTrack[] {
   })
 }
 
-function editablesToBundles(tracks: EditableTrack[]): CanonicalBundle[] {
+// Browser-side equivalent of lib/hash.ts's server-side hashInput — Node's `crypto`
+// module isn't available in a client component, but the Web Crypto API is.
+async function hashTrack(t: EditableTrack): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(t))
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+}
+
+async function editablesToBundles(tracks: EditableTrack[]): Promise<CanonicalBundle[]> {
   const now = new Date().toISOString()
-  return tracks.map(t => {
+  return Promise.all(tracks.map(async t => {
     const parties: CanonicalBundle['parties'] = []
     const writers: CanonicalBundle['work']['writers'] = []
     const publishers: CanonicalBundle['work']['publishers'] = []
@@ -69,14 +91,16 @@ function editablesToBundles(tracks: EditableTrack[]): CanonicalBundle[] {
         society_affiliations: p.pro ? [{ society_code: p.pro, right_type: 'PR' }] : []
       })
       const s = parseFloat(p.share) || 0
-      publishers.push({ party_id: p.id, role: 'E', pr_share: s, mr_share: s, sr_share: s, territory: 'WW' })
+      publishers.push({ party_id: p.id, role: 'E', pr_share: s, mr_share: s, sr_share: s })
     })
+    const territory_scope: TerritoryScope = { mode: t.territoryMode, territories: t.territoryMode === 'world' ? [] : t.territoryCodes }
+    const source_hash = await hashTrack(t)
     return {
       work: {
         id: t.workId, title: t.title.toUpperCase().trim(), alternate_titles: [],
         iswc: t.iswc.trim() || undefined, proprietary_ids: {}, writers, publishers, agreements: [],
         musical_work_distribution_category: 'POP', duration: t.duration.trim() || undefined,
-        created_at: now, updated_at: now, source_hash: ''
+        territory_scope, created_at: now, updated_at: now, source_hash
       },
       recordings: [{
         id: crypto.randomUUID(), title: t.title.toUpperCase().trim(),
@@ -86,7 +110,7 @@ function editablesToBundles(tracks: EditableTrack[]): CanonicalBundle[] {
       }],
       parties, relationships: [],
     }
-  })
+  }))
 }
 
 const EXAMPLES: Record<InputFormat, string> = {
@@ -130,6 +154,43 @@ function FieldInput({ label, value, onChange, warn, mono, placeholder }:
       <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         className={`text-xs border rounded px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-300 w-full ${mono ? 'font-mono' : ''} ${border}`} />
     </label>
+  )
+}
+
+function TerritoryInput({ mode, codes, specified, onChange }: {
+  mode: TerritoryScope['mode']; codes: string[]; specified: boolean
+  onChange: (u: { mode?: TerritoryScope['mode']; codes?: string[] }) => void
+}) {
+  const needsConfirmation = !specified
+  const toggle = (code: string) =>
+    onChange({ codes: codes.includes(code) ? codes.filter(c => c !== code) : [...codes, code] })
+  return (
+    <div className={`col-span-2 border rounded p-2 ${needsConfirmation ? 'border-amber-300 bg-amber-50' : 'border-zinc-200'}`}>
+      <span className={`text-xs font-medium ${needsConfirmation ? 'text-amber-700' : 'text-zinc-400'}`}>
+        Collection Territory{needsConfirmation ? ' · not specified in source — confirm below' : ''}
+      </span>
+      <div className="flex gap-3 mt-1 mb-1.5">
+        {(['world', 'include', 'exclude'] as const).map(m => (
+          <label key={m} className="flex items-center gap-1 text-xs text-zinc-600 cursor-pointer">
+            <input type="radio" name="territoryMode" checked={mode === m} onChange={() => onChange({ mode: m })} />
+            {m === 'world' ? 'Worldwide' : m === 'include' ? 'Only these territories' : 'All except these territories'}
+          </label>
+        ))}
+      </div>
+      {mode !== 'world' && (
+        <div className="max-h-32 overflow-y-auto border border-zinc-100 rounded p-1.5 grid grid-cols-3 gap-x-2 bg-white">
+          {SORTED_TERRITORIES.map(t => (
+            <label key={t.code} className="flex items-center gap-1 text-xs text-zinc-600 cursor-pointer truncate">
+              <input type="checkbox" checked={codes.includes(t.code)} onChange={() => toggle(t.code)} />
+              <span className="truncate">{t.name}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {mode !== 'world' && codes.length > 0 && (
+        <p className="text-xs text-zinc-400 mt-1">{codes.map(c => TERRITORIES_BY_CODE.get(c)?.alpha2 ?? c).join(', ')}</p>
+      )}
+    </div>
   )
 }
 
@@ -179,10 +240,11 @@ export default function Home() {
   const handleGenerate = useCallback(async () => {
     setGenerateError(null); setOutput(null); setIsGenerating(true)
     try {
+      const bundles = await editablesToBundles(tracks)
       const res = await fetch('/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bundles: editablesToBundles(tracks), outputFormat,
+          bundles, outputFormat,
           options: { society, version: cwrVersion, sender_name: senderName, sender_id: senderId, batch_number: 1 }
         })
       })
@@ -273,6 +335,14 @@ export default function Home() {
                       <FieldInput label="ISRC" value={ct.isrc} onChange={v => setTrack({ isrc: v })} warn="info" mono placeholder="CCXXXYYNNNNN" />
                       <FieldInput label="Artist / Performer" value={ct.artistName} onChange={v => setTrack({ artistName: v })} warn="info" />
                       <FieldInput label="Duration (HHMMSS)" value={ct.duration} onChange={v => setTrack({ duration: v })} mono placeholder="000412" />
+                      <TerritoryInput
+                        mode={ct.territoryMode} codes={ct.territoryCodes} specified={ct.territorySpecified}
+                        onChange={u => setTrack({
+                          territoryMode: u.mode ?? ct.territoryMode,
+                          territoryCodes: u.codes ?? ct.territoryCodes,
+                          territorySpecified: true,
+                        })}
+                      />
                     </div>
                   </div>
 

@@ -1,6 +1,6 @@
 export type UUID = string
 
-export type WriterRole = 'C' | 'A' | 'CA' | 'E' | 'ES' | 'AR' | 'AD' | 'TR' | 'PA' | 'SE'
+export type WriterRole = 'C' | 'A' | 'CA' | 'E' | 'ES' | 'AR' | 'AD' | 'TR' | 'PA' | 'SA' | 'SR'
 
 export interface Party {
   id: UUID
@@ -26,8 +26,17 @@ export interface PublisherContrib {
   pr_share: number
   mr_share: number
   sr_share: number
-  territory: string
   agreement_number?: string
+}
+
+// The collection territory for a work's publisher(s)/writer(s) (CWR SPT/SWT records).
+// 'world': collect everywhere. 'include': collect only in the listed territories.
+// 'exclude': collect everywhere except the listed territories ("all but Y").
+// `territories` holds 3-digit ISO 3166-1 numeric codes (see lib/data/territories.ts);
+// empty for 'world'.
+export interface TerritoryScope {
+  mode: 'world' | 'include' | 'exclude'
+  territories: string[]
 }
 
 export interface Work {
@@ -41,6 +50,10 @@ export interface Work {
   agreements: Array<{ type: string; date?: string; territories?: string[]; number?: string }>
   musical_work_distribution_category: 'POP' | 'SER' | 'JAZ' | 'UNK'
   duration?: string
+  // Collection territory for this work's publisher(s)/writer(s). Undefined means the
+  // source metadata didn't specify one — the generator defaults to worldwide, but the
+  // UI should prompt to confirm/override before generating CWR output.
+  territory_scope?: TerritoryScope
   created_at: string
   updated_at: string
   source_hash: string

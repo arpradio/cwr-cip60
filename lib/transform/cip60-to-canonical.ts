@@ -1,8 +1,9 @@
-import { createHash } from 'crypto'
 import type {
   CanonicalBundle, Party, Work, Recording, Relationship,
-  WriterContrib, PublisherContrib, WriterRole,
+  WriterContrib, PublisherContrib, WriterRole, TerritoryScope,
 } from '../types'
+import { resolveTerritoryCode } from '../data/territories'
+import { hashInput } from '../hash'
 
 // ─── CIP-60 loose types (real-world data is messier than the CDDL spec) ──────
 
@@ -13,6 +14,7 @@ interface AuthorDetails {
   // non-standard extensions
   role?: string
   pro?: string
+  territory?: string
 }
 
 interface ArtistDetails {
@@ -24,8 +26,10 @@ interface SongDetails {
   song_title?: string | string[]
   song_duration?: string
   track_number?: number
-  isrc?: string
-  iswc?: string
+  // CIP-60 v3 CDDL defines these as plain strings; real-world encoders sometimes
+  // wrap them in an array (e.g. multi-territory ISRCs) — tolerate that, but flag it.
+  isrc?: string | string[]
+  iswc?: string | string[]
   authors?: AuthorDetails[]
   artists?: ArtistDetails[]
   contributing_artists?: Array<{ name?: string; ipi?: string; role?: string[] }>
@@ -69,7 +73,10 @@ const ROLE_MAP: Record<string, WriterRole> = {
   translator: 'TR', tr: 'TR',
   adaptor: 'AD', ad: 'AD',
   'author of arrangement': 'E', e: 'E',
-  'sub-author': 'SE', se: 'SE',
+  // CWR Writer Designation Table: SA = Sub-Author, SR = Sub-Arranger (distinct from
+  // the Publisher Type table's own "SE" = Sub-publisher, a different code list).
+  'sub-author': 'SA', sa: 'SA',
+  'sub-arranger': 'SR', sr: 'SR',
 }
 
 function normalizeRole(role?: string): WriterRole {
@@ -83,16 +90,48 @@ function normalizeIPI(raw?: string): string | undefined {
   return digits ? digits.padStart(11, '0').slice(0, 11) : undefined
 }
 
-function normalizeISWC(raw?: string): string | undefined {
-  if (!raw) return undefined
-  const m = String(raw).toUpperCase().match(/T[-.]?(\d{9})[-.]?(\d)/)
-  return m ? `T-${m[1]}-${m[2]}` : undefined
+// CIP-60 defines isrc/iswc as a single string; some encoders emit a one-element
+// (or multi-element) array instead. Take the first non-empty entry and flag the deviation.
+function pickSpecString(raw: string | string[] | undefined, field: string, label: string, warnings: string[]): string | undefined {
+  if (raw == null) return undefined
+  if (Array.isArray(raw)) {
+    const first = raw.map(v => String(v ?? '').trim()).find(v => v.length > 0)
+    if (raw.length > 1) {
+      warnings.push(`"${label}": ${field} has ${raw.length} values but CIP-60 defines ${field} as a single string — using "${first ?? ''}" and discarding the rest.`)
+    } else {
+      warnings.push(`"${label}": ${field} is wrapped in an array but CIP-60 defines it as a single string — unwrapping.`)
+    }
+    return first
+  }
+  const s = String(raw).trim()
+  return s.length > 0 ? s : undefined
 }
 
-function normalizeISRC(raw?: string): string | undefined {
-  if (!raw) return undefined
-  const s = String(raw).replace(/[-\s]/g, '').toUpperCase()
-  return s.length >= 12 ? s.slice(0, 12) : undefined
+// ISWC standard form is T-DDD.DDD.DDD-D (a "T", a 9-digit work code, a check digit),
+// commonly written with dots, dashes, or no separators at all.
+function normalizeISWC(raw: string | string[] | undefined, label: string, warnings: string[]): string | undefined {
+  const value = pickSpecString(raw, 'iswc', label, warnings)
+  if (!value) return undefined
+  const compact = value.toUpperCase().replace(/[^T0-9]/g, '')
+  const m = compact.match(/^T(\d{10})$/)
+  if (!m) {
+    warnings.push(`"${label}": iswc "${value}" does not match the ISWC format T-DDD.DDD.DDD-D — omitting.`)
+    return undefined
+  }
+  return `T${m[1]}`
+}
+
+// ISRC standard form is CC-XXX-YY-NNNNN: 2-letter country, 3 alphanumeric registrant,
+// 2-digit year, 5-digit designation code (12 characters once separators are stripped).
+function normalizeISRC(raw: string | string[] | undefined, label: string, warnings: string[]): string | undefined {
+  const value = pickSpecString(raw, 'isrc', label, warnings)
+  if (!value) return undefined
+  const compact = value.replace(/[-\s]/g, '').toUpperCase()
+  if (!/^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(compact)) {
+    warnings.push(`"${label}": isrc "${value}" does not match the ISRC format CC-XXX-YY-NNNNN — omitting.`)
+    return undefined
+  }
+  return compact
 }
 
 function parseDuration(raw?: string): string | undefined {
@@ -105,14 +144,33 @@ function parseDuration(raw?: string): string | undefined {
   return `${String(h).padStart(2, '0')}${String(min).padStart(2, '0')}${String(sec).padStart(2, '0')}`
 }
 
-function hashInput(obj: unknown): string {
-  return createHash('sha256').update(JSON.stringify(obj)).digest('hex').slice(0, 16)
-}
-
 function normalizeSplits(raw: number[]): number[] {
   const total = raw.reduce((s, n) => s + n, 0)
   if (total === 0) return raw.map(() => parseFloat((100 / raw.length).toFixed(4)))
   return raw.map(n => parseFloat(((n / total) * 100).toFixed(4)))
+}
+
+// CIP-60 has no standard territory field (it's not in the v3 CDDL at all), so this is a
+// small invented convention for the non-standard `publishers[].territory` extension:
+//   "WW" / "WORLD" / unset  -> worldwide
+//   "US,CA,GB"              -> collect only in the listed territories
+//   "!DE,FR"                -> collect everywhere except the listed territories
+// Tokens may be an alpha-2 code, a country name, or a numeric ISO/TIS code.
+function parseTerritoryScope(raw: string | undefined, label: string, warnings: string[]): TerritoryScope | undefined {
+  if (raw == null) return undefined
+  const trimmed = raw.trim()
+  if (!trimmed || /^(WW|WORLD|WORLDWIDE)$/i.test(trimmed)) return { mode: 'world', territories: [] }
+
+  const exclude = trimmed.startsWith('!')
+  const tokens = (exclude ? trimmed.slice(1) : trimmed).split(',').map(t => t.trim()).filter(Boolean)
+  const territories: string[] = []
+  for (const token of tokens) {
+    const code = resolveTerritoryCode(token)
+    if (code) territories.push(code)
+    else warnings.push(`"${label}": territory "${token}" is not a recognized country — skipping.`)
+  }
+  if (territories.length === 0) return { mode: 'world', territories: [] }
+  return { mode: exclude ? 'exclude' : 'include', territories }
 }
 
 // release.artists can be a plain string, a single object, or an array
@@ -154,32 +212,44 @@ function buildBundle(
   }
   const normalizedShares = normalizeSplits(rawShares)
 
-  if (authors.length === 0) {
-    warnings.push(`"${primaryTitle}": no authors found — CWR SWR records will be omitted.`)
-  }
-
-  const writers: WriterContrib[] = authors.map((author, i) => {
+  // CIP-60's author_details has no "role" field per spec, but real-world encoders overload
+  // it with "Publisher" to mix publisher shares into the authors array. Route those into
+  // publishers instead of writers, while keeping the original share values — the combined
+  // authors pool was already normalized to 100% above, so each entry's share stays intact.
+  const writers: WriterContrib[] = []
+  const authorPublishers: PublisherContrib[] = []
+  authors.forEach((author, i) => {
     const partyId = crypto.randomUUID()
-    parties.push({
-      id: partyId,
-      name: String(author.name ?? ''),
-      type: 'writer',
-      ipi: normalizeIPI(author.ipi),
-      society_affiliations: author.pro
-        ? [{ society_code: String(author.pro), right_type: 'PR' }]
-        : [],
-    })
-    return {
-      party_id: partyId,
-      role: normalizeRole(author.role),
-      pr_share: normalizedShares[i],
-      mr_share: normalizedShares[i],
-      sr_share: normalizedShares[i],
+    const society_affiliations = author.pro
+      ? [{ society_code: String(author.pro), right_type: 'PR' as const }]
+      : []
+    if ((author.role ?? '').trim().toLowerCase() === 'publisher') {
+      parties.push({ id: partyId, name: String(author.name ?? ''), type: 'publisher', ipi: normalizeIPI(author.ipi), society_affiliations })
+      authorPublishers.push({
+        party_id: partyId,
+        role: 'E',
+        pr_share: normalizedShares[i],
+        mr_share: normalizedShares[i],
+        sr_share: normalizedShares[i],
+      })
+    } else {
+      parties.push({ id: partyId, name: String(author.name ?? ''), type: 'writer', ipi: normalizeIPI(author.ipi), society_affiliations })
+      writers.push({
+        party_id: partyId,
+        role: normalizeRole(author.role),
+        pr_share: normalizedShares[i],
+        mr_share: normalizedShares[i],
+        sr_share: normalizedShares[i],
+      })
     }
   })
 
-  // Publishers (non-standard extension)
-  const publishers: PublisherContrib[] = (song.publishers ?? []).map(pub => {
+  if (writers.length === 0) {
+    warnings.push(`"${primaryTitle}": no authors with a writer role — CWR SWR records will be omitted.`)
+  }
+
+  // Publishers (non-standard extension) + any "Publisher"-role authors above
+  const publishers: PublisherContrib[] = [...authorPublishers, ...(song.publishers ?? []).map((pub): PublisherContrib => {
     const partyId = crypto.randomUUID()
     parties.push({
       id: partyId,
@@ -196,15 +266,24 @@ function buildBundle(
       pr_share: parseFloat(String(pub.share ?? 0)),
       mr_share: parseFloat(String(pub.share ?? 0)),
       sr_share: parseFloat(String(pub.share ?? 0)),
-      territory: String(pub.territory ?? 'WW'),
     }
-  })
+  })]
 
-  const iswc = normalizeISWC(song.iswc)
-  if (!iswc) warnings.push(`"${primaryTitle}": no ISWC — will be assigned by PRO after registration.`)
+  // Territory is not part of the CIP-60 spec at all; check both places a "Publisher" can
+  // appear (the authors[] role="Publisher" convention, and the non-standard publishers[]
+  // extension) for a hint, else leave unset so the UI prompts for it before generating CWR.
+  const territoryHint = authors.map(a => a.territory).find(t => t != null)
+    ?? (song.publishers ?? []).map(p => p.territory).find(t => t != null)
+  const territoryScope = parseTerritoryScope(territoryHint, primaryTitle, warnings)
+  if (!territoryScope) {
+    warnings.push(`"${primaryTitle}": no collection territory specified — confirm worldwide or set explicitly before generating CWR.`)
+  }
 
-  const isrc = normalizeISRC(song.isrc)
-  if (!isrc) warnings.push(`"${primaryTitle}": no ISRC.`)
+  const iswc = normalizeISWC(song.iswc, primaryTitle, warnings)
+  if (song.iswc == null && !iswc) warnings.push(`"${primaryTitle}": no ISWC — will be assigned by PRO after registration.`)
+
+  const isrc = normalizeISRC(song.isrc, primaryTitle, warnings)
+  if (song.isrc == null && !isrc) warnings.push(`"${primaryTitle}": no ISRC.`)
 
   // Artist: prefer song.artists, then contributing_artists, then release-level artist
   const songArtistName = extractArtistName(song.artists as ArtistDetails[] | undefined)
@@ -222,6 +301,7 @@ function buildBundle(
     agreements: [],
     musical_work_distribution_category: 'POP',
     duration: parseDuration(song.song_duration),
+    territory_scope: territoryScope,
     created_at: now,
     updated_at: now,
     source_hash: sourceHash,

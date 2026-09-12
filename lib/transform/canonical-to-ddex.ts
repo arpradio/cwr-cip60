@@ -3,7 +3,7 @@ import type { CanonicalBundle, GenerateOptions } from '../types'
 const WRITER_ROLE_MAP: Record<string, string> = {
   C: 'Composer', A: 'Lyricist', CA: 'ComposerLyricist',
   AR: 'Arranger', TR: 'Translator', AD: 'Adaptor',
-  E: 'AuthorOfArrangement', SE: 'SubAuthor',
+  E: 'AuthorOfArrangement', SA: 'SubAuthor', SR: 'SubArranger',
 }
 
 const RECIPIENT_IDS: Record<string, string> = {
